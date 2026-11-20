@@ -1,0 +1,11 @@
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+.ipynb_checkpoints/
+.streamlit/secrets.toml
+
+.venv/
+.DS_Store
+__pycache__/
