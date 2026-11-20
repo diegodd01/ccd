@@ -942,13 +942,41 @@ desde abril de 2026 aún no tienen marca; la importancia por permutación corta 
 # =================================================================================================
 # TU TURNO · EXPLORÁ LOS SISMOS (INTERACTIVO CON PLOTLY + ENFOQUES GUIADOS)
 # =================================================================================================
+def _geo_plano(centro=None, escala=1.0, detalle=False):
+    """Mapa plano con una única copia del mundo (nunca repite continentes)."""
+    cfg = dict(
+        projection_type="equirectangular",
+        resolution=50 if detalle else 110,
+        showframe=False,
+        showcountries=True,
+        countrycolor="#d4d4d4",
+        showland=True,
+        landcolor="#f7f6f2",
+        showocean=True,
+        oceancolor="#edf2f6",
+        showcoastlines=True,
+        coastlinecolor="#c0c0c0",
+        showlakes=True,
+        lakecolor="#edf2f6",
+        bgcolor="rgba(0,0,0,0)",
+    )
+    if centro is None:
+        cfg["lataxis_range"] = [-60, 80]
+        cfg["lonaxis_range"] = [-180, 180]
+    else:
+        cfg["center"] = centro
+        cfg["projection_scale"] = escala
+        if abs(centro["lon"]) > 135:
+            cfg["projection_rotation"] = dict(lon=centro["lon"])
+    return cfg
+
+
 def _vista_mapa_detalle(df):
-    """Calcula el centro y nivel de zoom ideal para encuadrar un grupo de sismos en un mapa plano."""
+    """Calcula centro y escala de zoom para encuadrar un grupo de sismos en el mapa plano."""
     lat_min, lat_max = float(df["latitude"].min()), float(df["latitude"].max())
     lon_min, lon_max = float(df["longitude"].min()), float(df["longitude"].max())
     lat_c = (lat_min + lat_max) / 2
     lon_span = lon_max - lon_min
-    # Si la zona cruza el antimeridiano (±180°, ej. Fiji o Aleutianas), centramos sobre el Pacífico
     if lon_span > 180:
         lons_360 = np.where(df["longitude"] < 0, df["longitude"] + 360, df["longitude"])
         lon_c = float((lons_360.min() + lons_360.max()) / 2)
@@ -957,9 +985,9 @@ def _vista_mapa_detalle(df):
         lon_span = float(lons_360.max() - lons_360.min())
     else:
         lon_c = (lon_min + lon_max) / 2
-    span = max(lat_max - lat_min, lon_span * 0.65, 2.0)
-    zoom = float(np.clip(np.log2(360 / span) - 0.6, 1.4, 6.0))
-    return {"lat": lat_c, "lon": lon_c}, zoom
+    span = max((lat_max - lat_min) * 1.8, lon_span, 18.0)
+    escala = float(np.clip(260 / span, 2.0, 6.5))
+    return {"lat": lat_c, "lon": lon_c}, escala
 
 
 def _nombre_principal(serie):
@@ -968,7 +996,7 @@ def _nombre_principal(serie):
 
 
 # =================================================================================================
-# TU TURNO · EXPLORÁ LOS SISMOS (MAPA PLANO EN 2 NIVELES: ZONAS → CLIC PARA ZOOM A SISMOS)
+# TU TURNO · EXPLORÁ LOS SISMOS (MAPA PLANO ÚNICO EN 2 NIVELES: ZONAS → CLIC PARA ZOOM A SISMOS)
 # =================================================================================================
 def pagina_explora():
     encabezado(
@@ -998,7 +1026,10 @@ def pagina_explora():
     # 2. Filtros limpios en una fila
     f1, f2, f3 = st.columns([1.5, 1.3, 1.0])
     mag_min, mag_max = f1.slider("Rango de magnitud", 5.0, 9.0, (5.0, 9.0), step=0.1, format="%.1f")
-    region = f2.selectbox("Ir directo a una región", ["Todas (elegir en el mapa)"] + sorted(sismos["region"].dropna().unique()))
+    region = f2.selectbox(
+        "Ir directo a una región",
+        ["Todas (elegir en el mapa)"] + sorted(sismos["region"].dropna().unique()),
+    )
     epicentro = f3.radio("Epicentro", ["Todos", "mar", "tierra"], horizontal=True)
 
     # Aplicación de filtros
@@ -1034,7 +1065,6 @@ def pagina_explora():
         + (np.floor(vista["longitude"] / paso) * paso).astype(int).astype(str)
     )
 
-    # Determinamos si estamos en vista por zonas (nivel 1) o en zoom de detalle (nivel 2)
     zona_activa = st.session_state["explora_zona_id"]
     en_detalle = False
     titulo_zona = None
@@ -1071,7 +1101,7 @@ def pagina_explora():
             en_detalle = True
             datos_mapa = vista
 
-    # 4. KPIs dinámicos sincronizados (muestran la zona enfocada o el total filtrado)
+    # 4. KPIs dinámicos sincronizados
     k1, k2, k3, k4 = st.columns(4)
     k1.metric("Sismos visibles", miles(len(datos_mapa)))
     k2.metric("Con marca USGS", miles(int((datos_mapa["marca_real"] == "Sí").sum())))
@@ -1079,7 +1109,7 @@ def pagina_explora():
               help=f"Probabilidad ≥ {num(UMBRAL, 2)}")
     k4.metric("Magnitud máxima", num(datos_mapa["mag"].max(), 1))
 
-    # 5A. NIVEL 1: MAPA PLANO POR ZONAS (pocas burbujas, clic para hacer zoom)
+    # 5A. NIVEL 1: MAPA PLANO POR ZONAS (una sola copia del mundo, clic para hacer zoom)
     if not en_detalle:
         zonas = (
             vista.groupby("zona_id", as_index=False)
@@ -1095,7 +1125,7 @@ def pagina_explora():
             )
         )
         zonas["tasa_alerta"] = zonas["alertas"] / zonas["sismos"]
-        tam_burbuja = np.interp(np.sqrt(zonas["sismos"]), [1, np.sqrt(max(zonas["sismos"].max(), 2))], [18, 46])
+        tam_burbuja = np.interp(np.sqrt(zonas["sismos"]), [1, np.sqrt(max(zonas["sismos"].max(), 2))], [18, 44])
 
         custom_z = np.stack([
             zonas["zona_id"],
@@ -1106,12 +1136,12 @@ def pagina_explora():
             zonas["mag_max"].map(lambda v: num(v, 1)),
         ], axis=-1)
 
-        fig = go.Figure(go.Scattermap(
+        fig = go.Figure(go.Scattergeo(
             lat=zonas["lat"],
             lon=zonas["lon"],
             mode="markers+text",
             text=zonas["sismos"].astype(str),
-            textfont=dict(size=11, color="white"),
+            textfont=dict(size=10, color="white"),
             textposition="middle center",
             marker=dict(
                 size=tam_burbuja,
@@ -1119,7 +1149,8 @@ def pagina_explora():
                 colorscale=[[0.0, "#7b8fa1"], [0.45, AZUL], [1.0, ACENTO]],
                 cmin=0,
                 cmax=1,
-                opacity=0.88,
+                opacity=0.9,
+                line=dict(width=1, color="white"),
                 colorbar=dict(title="% alerta", tickformat=".0%", len=0.65, thickness=12),
             ),
             customdata=custom_z,
@@ -1133,8 +1164,8 @@ def pagina_explora():
             name="Zonas",
         ))
         fig.update_layout(
-            map=dict(style="carto-positron", center={"lat": 15, "lon": 0}, zoom=1.15),
-            height=500,
+            geo=_geo_plano(),
+            height=470,
             margin=dict(l=0, r=0, t=5, b=0),
             clickmode="event+select",
         )
@@ -1166,9 +1197,11 @@ def pagina_explora():
 
     # 5B. NIVEL 2: MAPA PLANO CON ZOOM Y SISMOS INDIVIDUALES
     else:
-        centro, zoom = _vista_mapa_detalle(datos_mapa)
-        if titulo_zona is None:  # si activó "Ver todos los puntos sin agrupar"
-            centro, zoom = {"lat": 15, "lon": 0}, 1.15
+        if titulo_zona is None:
+            geo_cfg = _geo_plano()
+        else:
+            centro, escala = _vista_mapa_detalle(datos_mapa)
+            geo_cfg = _geo_plano(centro=centro, escala=escala, detalle=True)
 
         orden_capas = ["acierto: sin marca", "sin marca cargada", "falsa alarma", "acierto: con marca", "falso negativo"]
         fig = go.Figure()
@@ -1176,7 +1209,8 @@ def pagina_explora():
             sub = datos_mapa[datos_mapa["resultado"] == res]
             if sub.empty:
                 continue
-            opacidad = 0.35 if res == "acierto: sin marca" else 0.88
+            opacidad = 0.35 if res == "acierto: sin marca" else 0.9
+            borde = 0.0 if res == "acierto: sin marca" else 0.7
             custom = np.stack([
                 sub["place"].fillna("—"),
                 sub["time"].str.slice(0, 16),
@@ -1189,15 +1223,16 @@ def pagina_explora():
                 sub["resultado"],
                 sub["conjunto"],
             ], axis=-1)
-            fig.add_trace(go.Scattermap(
+            fig.add_trace(go.Scattergeo(
                 lat=sub["latitude"],
                 lon=sub["longitude"],
                 name=f"{res} ({miles(len(sub))})",
                 mode="markers",
                 marker=dict(
-                    size=np.interp(sub["tam_mapa"], [1, 40], [7, 22]),
+                    size=np.interp(sub["tam_mapa"], [1, 40], [7, 20]),
                     color=COLORES_RESULTADO[res],
                     opacity=opacidad,
+                    line=dict(width=borde, color="white"),
                 ),
                 customdata=custom,
                 hovertemplate=(
@@ -1212,8 +1247,8 @@ def pagina_explora():
             ))
 
         fig.update_layout(
-            map=dict(style="carto-positron", center=centro, zoom=zoom),
-            height=500,
+            geo=geo_cfg,
+            height=470,
             margin=dict(l=0, r=0, t=10, b=0),
             legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0, title=None),
         )
@@ -1223,7 +1258,7 @@ def pagina_explora():
             "para prender y apagar resultados."
         )
 
-    # 6. Distribución por magnitud sincronizada con lo que estás mirando
+    # 6. Distribución por magnitud sincronizada
     col_hist, col_info = st.columns([2.2, 1])
     with col_hist:
         fig_hist = px.histogram(
@@ -1278,8 +1313,9 @@ def pagina_explora():
 
     boton_siguiente("Probá el modelo", "Probar el modelo con tus propios datos")
 
+
 # =================================================================================================
-# TU TURNO · PROBÁ EL MODELO 
+# TU TURNO · PROBÁ EL MODELO (MAPA PLANO ÚNICO CLICABLE CON ZOOM POR ZONA)
 # =================================================================================================
 def pagina_proba():
     encabezado(
@@ -1295,7 +1331,6 @@ def pagina_proba():
     def dentro(valor, rango_):
         return float(min(max(float(valor), float(rango_[0])), float(rango_[1])))
 
-    # Estado inicial de los controles (una sola vez)
     defaults = {
         "proba_mag": dentro(7.0, r["mag"]),
         "proba_depth": dentro(25.0, r["depth"]),
@@ -1311,7 +1346,6 @@ def pagina_proba():
         if k not in st.session_state:
             st.session_state[k] = v
 
-    # Aplica cambios pendientes disparados por un clic en el mapa (antes de dibujar los sliders)
     pend = st.session_state.pop("_proba_pendiente", None)
     if pend:
         for k, v in pend.items():
@@ -1336,7 +1370,6 @@ def pagina_proba():
     elegido = st.selectbox("Partir de un sismo real", opciones)
     real = ejemplos[opciones.index(elegido) - 1][1] if elegido != opciones[0] else None
 
-    # Si cambió el ejemplo elegido, actualizamos los controles y enfocamos el mapa en ese lugar
     if elegido != st.session_state["proba_ejemplo_prev"]:
         st.session_state["proba_ejemplo_prev"] = elegido
         if real is not None:
@@ -1358,7 +1391,6 @@ def pagina_proba():
             "Los controles arrancan con sus valores (redondeados): movelos o cliqueá otro punto en el mapa."
         )
 
-    # Controles sincronizados con session_state
     p1, p2 = st.columns(2)
     mag = p1.slider("Magnitud", float(r["mag"][0]), float(r["mag"][1]), step=0.1, format="%.1f", key="proba_mag")
     depth = p1.slider("Profundidad (km)", float(r["depth"][0]), float(r["depth"][1]), step=1.0, key="proba_depth")
@@ -1390,7 +1422,6 @@ def pagina_proba():
             f"{num(todos_mb['mag'].max(), 1)}). Tomá esta probabilidad con cuidado."
         )
 
-    # Predicción y tarjetas KPI
     probabilidad = guardado["pipeline"].predict_proba(modelo.caso(mag, depth, lat, lon, mag_type, en_el_mar))[0, 1]
     alerta = probabilidad >= UMBRAL
 
@@ -1409,7 +1440,7 @@ def pagina_proba():
         f"{'el mar' if en_el_mar else 'tierra'}). La diferencia con la predicción la explica, sobre todo, el lugar."
     )
 
-    # --- Mapa plano en 2 niveles: vista mundial por zonas → clic para zoom y detalle cercano ---
+    # --- Mapa plano en 2 niveles sin continentes duplicados ---
     zona_enfocada = st.session_state["proba_zoom_zona"]
     b1, b2 = st.columns([3, 1.3])
     if zona_enfocada is None:
@@ -1430,17 +1461,17 @@ def pagina_proba():
     fig_sim = go.Figure()
 
     # Caja regional de Alaska como referencia visual
-    fig_sim.add_trace(go.Scattermap(
+    fig_sim.add_trace(go.Scattergeo(
         lat=[lat_c, lat_c, 74, 74, lat_c],
         lon=[-179.5, lon_c, lon_c, -179.5, -179.5],
         mode="lines",
         name="Zona umbral regional (Alaska / Costa Oeste)",
-        line=dict(color="#e3242b", width=1.6),
+        line=dict(color="#e3242b", width=1.8, dash="dash"),
         hoverinfo="skip",
     ))
 
     if zona_enfocada is None:
-        # NIVEL 1: Mapa plano limpio con pocas zonas sísmicas clicables (sin saturar de puntos)
+        # NIVEL 1: Mapa plano mundial único con zonas sísmicas clicables
         paso = 22
         tmp = modelados.assign(
             zid=(np.floor(modelados["latitude"] / paso) * paso).astype(int).astype(str)
@@ -1460,7 +1491,7 @@ def pagina_proba():
         )
         zonas = zonas[zonas["sismos"] >= 20].copy()
         zonas["tasa"] = zonas["con_marca"] / zonas["sismos"]
-        tam_z = np.interp(np.sqrt(zonas["sismos"]), [1, np.sqrt(max(zonas["sismos"].max(), 2))], [16, 34])
+        tam_z = np.interp(np.sqrt(zonas["sismos"]), [1, np.sqrt(max(zonas["sismos"].max(), 2))], [14, 30])
         custom_z = np.stack([
             np.full(len(zonas), "zona"),
             zonas["nombre"],
@@ -1471,12 +1502,12 @@ def pagina_proba():
             zonas["tasa"].map(lambda v: pct(v, 1)),
         ], axis=-1)
 
-        fig_sim.add_trace(go.Scattermap(
+        fig_sim.add_trace(go.Scattergeo(
             lat=zonas["lat"],
             lon=zonas["lon"],
             mode="markers",
             name="Zonas sísmicas (clic para probar ahí)",
-            marker=dict(size=tam_z, color="#6d8290", opacity=0.45),
+            marker=dict(size=tam_z, color="#6d8290", opacity=0.45, line=dict(width=1, color="white")),
             customdata=custom_z,
             hovertemplate=(
                 "<b>%{customdata[1]}</b><br>"
@@ -1484,9 +1515,9 @@ def pagina_proba():
                 "<i>Hacé clic para mover tu sismo acá y hacer zoom</i><extra></extra>"
             ),
         ))
-        centro_mapa, zoom_mapa = {"lat": 15, "lon": 0}, 1.15
+        geo_cfg = _geo_plano()
     else:
-        # NIVEL 2: Zoom en la zona + sismos reales cercanos de magnitud parecida (máx. 180)
+        # NIVEL 2: Zoom en la zona + sismos reales cercanos de magnitud parecida
         dlat = (modelados["latitude"] - lat).abs()
         dlon = ((modelados["longitude"] - lon + 180) % 360 - 180).abs()
         cercanos = modelados[(dlat <= 12) & (dlon <= 16) & ((modelados["mag"] - mag).abs() <= 0.6)].copy()
@@ -1497,7 +1528,7 @@ def pagina_proba():
 
         for valor_marca, etiqueta_m, color_m, tam_m, opac_m in [
             (0, "Sismos reales cercanos · sin marca", GRIS, 9, 0.55),
-            (1, "Sismos reales cercanos · con marca USGS", AZUL_CLARO, 12, 0.88),
+            (1, "Sismos reales cercanos · con marca USGS", AZUL_CLARO, 12, 0.9),
         ]:
             sub = cercanos[cercanos["tsunami"] == valor_marca]
             if sub.empty:
@@ -1512,12 +1543,12 @@ def pagina_proba():
                 sub["depth"].map(lambda v: num(v, 0)),
                 np.full(len(sub), "Sí" if valor_marca == 1 else "No"),
             ], axis=-1)
-            fig_sim.add_trace(go.Scattermap(
+            fig_sim.add_trace(go.Scattergeo(
                 lat=sub["latitude"],
                 lon=sub["longitude"],
                 mode="markers",
                 name=f"{etiqueta_m} ({len(sub)})",
-                marker=dict(size=tam_m, color=color_m, opacity=opac_m),
+                marker=dict(size=tam_m, color=color_m, opacity=opac_m, line=dict(width=0.7, color="white")),
                 customdata=custom_s,
                 hovertemplate=(
                     "<b>%{customdata[1]}</b><br>"
@@ -1526,16 +1557,12 @@ def pagina_proba():
                     "<i>Hacé clic para mover tu sismo a este punto</i><extra></extra>"
                 ),
             ))
-        centro_mapa, zoom_mapa = {"lat": lat, "lon": lon}, 4.0
+        geo_cfg = _geo_plano(centro={"lat": lat, "lon": lon}, escala=4.5, detalle=True)
 
-    # Pin del sismo simulado (aro blanco detrás para que destaque siempre sobre el mapa)
-    fig_sim.add_trace(go.Scattermap(
-        lat=[lat], lon=[lon], mode="markers", showlegend=False, hoverinfo="skip",
-        marker=dict(size=24, color="white", opacity=0.95),
-    ))
-    fig_sim.add_trace(go.Scattermap(
+    # Pin del sismo simulado
+    fig_sim.add_trace(go.Scattergeo(
         lat=[lat], lon=[lon], mode="markers", name="Tu sismo simulado",
-        marker=dict(size=16, color=AZUL if alerta else "#e3242b"),
+        marker=dict(size=16, color=AZUL if alerta else "#e3242b", line=dict(width=3, color="white")),
         hovertemplate=(
             f"<b>Tu sismo simulado</b><br>"
             f"Lat: {num(lat, 1)} · Lon: {num(lon, 1)} ({'mar' if en_el_mar else 'tierra'})<br>"
@@ -1545,7 +1572,7 @@ def pagina_proba():
     ))
 
     fig_sim.update_layout(
-        map=dict(style="carto-positron", center=centro_mapa, zoom=zoom_mapa),
+        geo=geo_cfg,
         height=440,
         margin=dict(l=0, r=0, t=10, b=0),
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0, title=None),
