@@ -13,7 +13,6 @@ import altair as alt
 import joblib
 import numpy as np
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import sklearn
 import streamlit as st
@@ -51,15 +50,6 @@ CORTES_MAG = [4.99, 5.5, 6.0, 6.5, 7.0, 7.5, 9.5]
 RANGOS_MAG = ["5,0–5,5", "5,5–6,0", "6,0–6,5", "6,5–7,0", "7,0–7,5", "más de 7,5"]
 CORTES_PROF = [-1, 70, 300, 1000]
 RANGOS_PROF = ["superficial (menos de 70 km)", "intermedio (70 a 300 km)", "profundo (más de 300 km)"]
-
-# Enfoques de zoom para el mapa interactivo de «Explorá los sismos»
-VISTAS_MAPA = {
-    "Todo el mundo": None,
-    "Alaska y costa oeste (umbral regional USGS)": {"lat": [25, 72], "lon": [-179, -110]},
-    "Pacífico Oeste (Japón, Indonesia, Kermadec)": {"lat": [-45, 55], "lon": [95, 180]},
-    "Sudamérica (Chile, Perú, Andes)": {"lat": [-58, 15], "lon": [-95, -55]},
-    "Caribe y Centroamérica": {"lat": [5, 28], "lon": [-105, -58]},
-}
 
 # Tipos de magnitud de la USGS: el nombre que muestra el selector de «Probá el modelo» y la explicación de su cuadro
 NOMBRES_MAGTYPE = {
@@ -107,6 +97,12 @@ def num(x, dec=3):
 
 def miles(n):
     return f"{n:,}".replace(",", ".")
+
+
+def f1_binario(tp, fp, fn):
+    """F1 normal (clase positiva: con marca de la USGS) calculado desde la matriz de confusión."""
+    denom = 2 * tp + fp + fn
+    return (2 * tp / denom) if denom else 0.0
 
 
 def grafico(chart):
@@ -191,6 +187,7 @@ def inyectar_estilos():
     </style>
     """, unsafe_allow_html=True)
 
+
 def encabezado(kicker, titulo, bajada=None):
     st.markdown(f"<div class='kicker'>{kicker}</div>", unsafe_allow_html=True)
     st.markdown(f"<div class='titulo-historia'>{titulo}</div>", unsafe_allow_html=True)
@@ -241,6 +238,41 @@ def asociacion(x, y):
     """Pearson, Spearman y la brecha entre ambos."""
     p, s = x.corr(y), x.corr(y, method="spearman")
     return p, s, s - p
+
+
+# --- Helpers geográficos (mapas planos únicos, sin continentes duplicados) ----------------------
+def _geo_plano(centro=None, escala=1.0, detalle=False):
+    """Mapa plano con una única copia del mundo (nunca repite continentes)."""
+    cfg = dict(
+        projection_type="equirectangular",
+        resolution=50 if detalle else 110,
+        showframe=False,
+        showcountries=True,
+        countrycolor="#d4d4d4",
+        showland=True,
+        landcolor="#f7f6f2",
+        showocean=True,
+        oceancolor="#edf2f6",
+        showcoastlines=True,
+        coastlinecolor="#c0c0c0",
+        showlakes=True,
+        lakecolor="#edf2f6",
+        bgcolor="rgba(0,0,0,0)",
+    )
+    if centro is None:
+        cfg["lataxis_range"] = [-60, 80]
+        cfg["lonaxis_range"] = [-180, 180]
+    else:
+        cfg["center"] = centro
+        cfg["projection_scale"] = escala
+        if abs(centro["lon"]) > 135:
+            cfg["projection_rotation"] = dict(lon=centro["lon"])
+    return cfg
+
+
+def _nombre_principal(serie):
+    moda = serie.dropna().mode()
+    return moda.iloc[0] if len(moda) else "Océano"
 
 
 # --- Carga de datos y modelo --------------------------------------------------------------------
@@ -325,6 +357,9 @@ def pagina_proyecto():
 
     en_alaska = int(chicos["region"].isin(REGION_ALASKA_OESTE).sum())
     pct_alaska = en_alaska / len(chicos) if len(chicos) else 0
+    f1_test_normal = f1_binario(
+        int(test["aciertos_con_marca"]), int(test["falsas_alarmas"]), int(test["falsos_negativos"])
+    )
 
     st.markdown(
         f"<div class='cita-veredicto'>Con la magnitud y el lugar del sismo se anticipa el "
@@ -336,8 +371,8 @@ def pagina_proyecto():
     c1, c2, c3 = st.columns(3)
     tarjeta_kpi(
         c1,
-        num(test["f1_macro"], 2),
-        f"f1 macro en el test, contra {num(resumen['piso_test']['f1_macro'], 2)} del piso que dice siempre «sin marca»",
+        num(f1_test_normal, 2),
+        "F1 en el test (clase con marca), contra 0,00 del piso que dice siempre «sin marca»",
     )
     tarjeta_kpi(
         c2,
@@ -379,7 +414,7 @@ def pagina_datos():
         f"apenas 1 de cada {round(n_total / n_marca)}",
         "Cada fila es un sismo de magnitud 5 o más bajado de la API de la USGS. Con clases tan desparejas, un modelo "
         f"que diga siempre «sin marca» acierta el {pct(1 - n_marca / n_total)} sin aprender nada: por eso la accuracy "
-        "engaña y medimos todo con f1 macro.",
+        "engaña y miramos el F1 sobre la clase con marca.",
     )
 
     # Distribución de clases (el primer golpe visual de la sección, igual que en el ejemplo)
@@ -507,10 +542,10 @@ mar.
         con_sig = {a["variante"]: a for a in exp["ablacion"]}["+ sig (fuga)"]
         base_ = {a["variante"]: a for a in exp["ablacion"]}["base"]
         st.markdown(f"""
-**La columna descartada por fuga: `sig`.** Separa muy bien las clases (separación {num(sep_sig, 2)}, zona
-{semaforo(sep_sig)}), pero porque la USGS la calcula **usando la propia alerta de tsunami**. Además copia a la magnitud
-(Spearman {num(s_ms, 2)}). En la ablación da {num(con_sig['f1'])} contra {num(base_['f1'])} sin ella; se descarta por
-cómo se construye, no por el puntaje.
+**La columna descartada por fuga: `sig`.** Separa muy bien las clases (separación {num(sep_sig, 2)} desvíos), pero
+porque la USGS la calcula **usando la propia alerta de tsunami**. Además copia a la magnitud (Spearman {num(s_ms, 2)}).
+En la ablación da {num(con_sig['f1'])} contra {num(base_['f1'])} sin ella; se descarta por cómo se construye, no por el
+puntaje.
 
 **Las demás columnas descartadas:** `status` tiene un único valor, `type` es casi siempre «earthquake» y `net` es «us»
 en el {pct((sismos['net'] == 'us').mean(), 1)}; `nst`, `dmin`, `gap` y `rms` tienen nulos de instrumentación y la USGS
@@ -670,6 +705,7 @@ redundancia. Los pares más altos son `mag`–`sig` (confirma que `sig` copia a 
 
     boton_siguiente("El modelo", "Seguir con «El modelo»")
 
+
 # =================================================================================================
 # CAPÍTULO 4 · EL MODELO
 # =================================================================================================
@@ -682,8 +718,8 @@ def pagina_modelo():
         "EL MODELO",
         f"Un gradient boosting detecta {test['aciertos_con_marca']} de cada "
         f"{test['aciertos_con_marca'] + test['falsos_negativos']} marcas, y la ubicación pesa tanto como la magnitud",
-        "La métrica elegida antes de probar modelos es el f1 macro (le da el mismo peso a la clase chica). Como un "
-        "falso negativo cuesta mucho más que una falsa alarma, bajamos el umbral de decisión con validación cruzada.",
+        "Comparamos modelos en validación cruzada y evaluamos el resultado final en test con F1 binario sobre la "
+        "clase con marca. Como un falso negativo cuesta mucho más que una falsa alarma, bajamos el umbral de decisión.",
     )
 
     # 1. Comparación de modelos en el flujo principal (como en el ejemplo del profesor)
@@ -724,14 +760,16 @@ def pagina_modelo():
         "geográfica como Alaska."
     )
 
-    
-
-   # 2. Resultado final en el conjunto de test (matriz de confusión 2×2 normalizada por fila)
+    # 2. Resultado final en el conjunto de test (matriz de confusión 2×2 + F1 normal)
     st.markdown("#### Qué hizo en el test (visto una sola vez)")
     tp = int(test["aciertos_con_marca"])
     fn = int(test["falsos_negativos"])
     fp = int(test["falsas_alarmas"])
     tn = int(test["verdaderos_negativos"])
+
+    f1_normal = f1_binario(tp, fp, fn)
+    prec_test = tp / (tp + fp) if (tp + fp) else 0.0
+    rec_test = tp / (tp + fn) if (tp + fn) else 0.0
 
     matriz = pd.DataFrame([
         {"real": "Con marca USGS", "pred": "Alerta",     "n": tp, "parte": tp / (tp + fn), "tipo": "Acierto (verdadero positivo)"},
@@ -749,9 +787,7 @@ def pagina_modelo():
                 axis=alt.Axis(labelFontSize=12, titleFontSize=12)),
     )
     celdas = base_cm.mark_rect(stroke="white", strokeWidth=3, cornerRadius=6).encode(
-        color=alt.Color("parte:Q", title="% de la fila",
-                        scale=alt.Scale(domain=[0, 1], range=["#eef3f6", ACENTO]),
-                        legend=None),
+        color=alt.Color("parte:Q", scale=alt.Scale(domain=[0, 1], range=["#eef3f6", ACENTO]), legend=None),
         tooltip=[
             alt.Tooltip("real:N", title="Realidad"),
             alt.Tooltip("pred:N", title="Predicción"),
@@ -764,19 +800,24 @@ def pagina_modelo():
     txt_n = base_cm.mark_text(dy=-9, fontSize=18, fontWeight="bold").encode(text="n_txt:N", color=color_txt)
     txt_pct = base_cm.mark_text(dy=12, fontSize=12).encode(text="pct_txt:N", color=color_txt)
 
-    col_cm, col_lectura = st.columns([1.15, 1.35])
+    col_cm, col_lectura = st.columns([1.1, 1.4])
     with col_cm:
         grafico((celdas + txt_n + txt_pct).properties(width=390, height=230))
+        m_f1, m_rec, m_prec = st.columns(3)
+        m_f1.metric("F1 (con marca)", num(f1_normal, 2), help="2·TP / (2·TP + FP + FN). Piso = 0,00")
+        m_rec.metric("Recall", pct(rec_test, 1))
+        m_prec.metric("Precisión", pct(prec_test, 1))
     with col_lectura:
         st.markdown(f"""
-Con el umbral ajustado en **{num(UMBRAL, 2)}**:
+Con el umbral ajustado en **{num(UMBRAL, 2)}**, evaluado con **F1 normal (binario)** sobre la clase con marca —sin
+promediar con la clase mayoritaria «sin marca»— el modelo alcanza **{num(f1_normal, 2)}** (contra **0,00** del piso):
 
-- **Aciertos con marca ({miles(tp)}):** detecta el **{pct(test['recall_tsunami'], 1)}** de los {miles(tp + fn)} sismos
-  marcados del test.
-- **Falsos negativos ({miles(fn)}):** es el error caro —sismos que la USGS marcó y el modelo dejó pasar. El detalle de
-  cada uno está en *«Cómo lo sabemos»*.
-- **Falsas alarmas ({miles(fp)}):** 1 cada {round((tn + fp) / fp)} sismos sin marca. De cada 100 alertas que emite el
-  modelo, **{round(test['precision_tsunami'] * 100)}** corresponden a una marca real.
+- **Aciertos con marca ({miles(tp)}):** detecta el **{pct(rec_test, 1)}** de los {miles(tp + fn)} sismos marcados del
+  test.
+- **Falsos negativos ({miles(fn)}):** es el error caro —sismos que la USGS marcó y el modelo dejó pasar. El detalle está
+  en *«Cómo lo sabemos»*.
+- **Falsas alarmas ({miles(fp)}):** 1 cada {round((tn + fp) / fp)} sismos sin marca. De cada 100 alertas emitidas,
+  **{round(prec_test * 100)}** corresponden a una marca real.
 - **Aciertos sin marca ({miles(tn)}):** descarta correctamente el **{pct(tn / (tn + fp), 1)}** de los sismos sin alerta.
 """)
 
@@ -903,9 +944,9 @@ precisión pasa de {pct(vc05['precision_tsunami'], 1)} a {pct(vc['precision_tsun
         ).properties(width=760, height=230))
 
         st.markdown(f"""
-**Resumen en el test** (umbral {num(UMBRAL, 2)}): f1 macro {num(test['f1_macro'])} (VC: {num(vc['f1_macro'])}),
-recall {pct(test['recall_tsunami'])}, precisión {pct(test['precision_tsunami'])}, PR-AUC {num(test['pr_auc'], 2)}
-contra {num(resumen['piso_test']['pr_auc'], 2)} del piso.
+**Resumen en el test** (umbral {num(UMBRAL, 2)}): F1 binario (clase con marca) **{num(f1_normal)}**, recall
+{pct(rec_test, 1)}, precisión {pct(prec_test, 1)}, f1 macro {num(test['f1_macro'])} (VC: {num(vc['f1_macro'])}),
+PR-AUC {num(test['pr_auc'], 2)} contra {num(resumen['piso_test']['pr_auc'], 2)} del piso.
 
 **Ablación de columnas** (la franja gris es ± 1 desvío del modelo base; sólo sacar latitud/longitud sale del empate):
 """)
@@ -940,74 +981,18 @@ desde abril de 2026 aún no tienen marca; la importancia por permutación corta 
 
 
 # =================================================================================================
-# TU TURNO · EXPLORÁ LOS SISMOS (INTERACTIVO CON PLOTLY + ENFOQUES GUIADOS)
-# =================================================================================================
-def _geo_plano(centro=None, escala=1.0, detalle=False):
-    """Mapa plano con una única copia del mundo (nunca repite continentes)."""
-    cfg = dict(
-        projection_type="equirectangular",
-        resolution=50 if detalle else 110,
-        showframe=False,
-        showcountries=True,
-        countrycolor="#d4d4d4",
-        showland=True,
-        landcolor="#f7f6f2",
-        showocean=True,
-        oceancolor="#edf2f6",
-        showcoastlines=True,
-        coastlinecolor="#c0c0c0",
-        showlakes=True,
-        lakecolor="#edf2f6",
-        bgcolor="rgba(0,0,0,0)",
-    )
-    if centro is None:
-        cfg["lataxis_range"] = [-60, 80]
-        cfg["lonaxis_range"] = [-180, 180]
-    else:
-        cfg["center"] = centro
-        cfg["projection_scale"] = escala
-        if abs(centro["lon"]) > 135:
-            cfg["projection_rotation"] = dict(lon=centro["lon"])
-    return cfg
-
-
-def _vista_mapa_detalle(df):
-    """Calcula centro y escala de zoom para encuadrar un grupo de sismos en el mapa plano."""
-    lat_min, lat_max = float(df["latitude"].min()), float(df["latitude"].max())
-    lon_min, lon_max = float(df["longitude"].min()), float(df["longitude"].max())
-    lat_c = (lat_min + lat_max) / 2
-    lon_span = lon_max - lon_min
-    if lon_span > 180:
-        lons_360 = np.where(df["longitude"] < 0, df["longitude"] + 360, df["longitude"])
-        lon_c = float((lons_360.min() + lons_360.max()) / 2)
-        if lon_c > 180:
-            lon_c -= 360
-        lon_span = float(lons_360.max() - lons_360.min())
-    else:
-        lon_c = (lon_min + lon_max) / 2
-    span = max((lat_max - lat_min) * 1.8, lon_span, 18.0)
-    escala = float(np.clip(260 / span, 2.0, 6.5))
-    return {"lat": lat_c, "lon": lon_c}, escala
-
-
-def _nombre_principal(serie):
-    moda = serie.dropna().mode()
-    return moda.iloc[0] if len(moda) else "Océano"
-
-
-# =================================================================================================
-# TU TURNO · EXPLORÁ LOS SISMOS (MAPA PLANO ÚNICO EN 2 NIVELES: ZONAS → CLIC PARA ZOOM A SISMOS)
+# TU TURNO · EXPLORÁ LOS SISMOS (EJES + MAPA DE CALOR + CLIC A LA UBICACIÓN)
 # =================================================================================================
 def pagina_explora():
     encabezado(
         "TU TURNO",
-        "Explorá los sismos y dónde acierta o falla el modelo",
-        "Para no llenar la pantalla de puntos, el mapa arranca agrupado por zonas. **Hacé clic en cualquier círculo** "
-        "para acercarte y ver los sismos individuales de esa región.",
+        "Explorá los sismos en el plano y ubicá cualquiera en el mapa",
+        "El mapa de calor muestra dónde se concentran los sismos y cada punto es un sismo individual. "
+        "**Hacé clic en cualquier punto** para ver toda su información y saltar directo a su ubicación en el mapa.",
     )
 
-    if "explora_zona_id" not in st.session_state:
-        st.session_state["explora_zona_id"] = None
+    if "explora_sismo_id" not in st.session_state:
+        st.session_state["explora_sismo_id"] = None
 
     # 1. Enfoques rápidos
     opciones_enfoque = [
@@ -1023,14 +1008,19 @@ def pagina_explora():
     else:
         enfoque = st.radio("¿Qué querés inspeccionar?", opciones_enfoque, horizontal=True)
 
-    # 2. Filtros limpios en una fila
-    f1, f2, f3 = st.columns([1.5, 1.3, 1.0])
-    mag_min, mag_max = f1.slider("Rango de magnitud", 5.0, 9.0, (5.0, 9.0), step=0.1, format="%.1f")
-    region = f2.selectbox(
-        "Ir directo a una región",
-        ["Todas (elegir en el mapa)"] + sorted(sismos["region"].dropna().unique()),
-    )
-    epicentro = f3.radio("Epicentro", ["Todos", "mar", "tierra"], horizontal=True)
+    # 2. Filtros + selector de eje Y
+    ejes_y = {
+        "Profundidad (km)": ("depth", "Profundidad (km)"),
+        "Probabilidad del modelo (%)": ("prob_pct_num", "Probabilidad según el modelo (%)"),
+        "Distancia a la costa (km)": ("dist_costa_km", "Distancia a la costa (+ mar / − tierra, km)"),
+    }
+    f1, f2, f3, f4 = st.columns([1.25, 1.25, 1.15, 0.95])
+    eje_y_nombre = f1.selectbox("Eje vertical (Y)", list(ejes_y.keys()))
+    mag_min, mag_max = f2.slider("Rango de magnitud (eje X)", 5.0, 9.0, (5.0, 9.0), step=0.1, format="%.1f")
+    region = f3.selectbox("Región", ["Todas"] + sorted(sismos["region"].dropna().unique()))
+    epicentro = f4.radio("Epicentro", ["Todos", "mar", "tierra"], horizontal=True)
+
+    col_y, titulo_y = ejes_y[eje_y_nombre]
 
     # Aplicación de filtros
     vista = sismos[(sismos["mag"] >= mag_min) & (sismos["mag"] <= mag_max)].copy()
@@ -1041,7 +1031,7 @@ def pagina_explora():
     elif enfoque == "Sismos 2026 sin marca cargada":
         vista = vista[vista["conjunto"] == "sin marca cargada"]
 
-    if region != "Todas (elegir en el mapa)":
+    if region != "Todas":
         vista = vista[vista["region"] == region]
     if epicentro != "Todos":
         vista = vista[vista["en_el_mar"] == epicentro]
@@ -1054,259 +1044,274 @@ def pagina_explora():
     vista["marca_real"] = vista["tsunami"].map({1: "Sí", 0: "No"}).where(
         vista["conjunto"] != "sin marca cargada", "Todavía no cargada"
     )
+    vista["prob_pct_num"] = (vista["probabilidad"] * 100).round(1)
     vista["prob_txt"] = (vista["probabilidad"] * 100).round(0).astype(int).astype(str) + " %"
-    vista["tam_mapa"] = np.clip((vista["mag"] - 4.7) ** 2.2, 1.0, 40.0)
 
-    # Agrupación espacial en celdas de 14° × 14° para la vista general sin ruido
-    paso = 14
-    vista["zona_id"] = (
-        (np.floor(vista["latitude"] / paso) * paso).astype(int).astype(str)
-        + "_"
-        + (np.floor(vista["longitude"] / paso) * paso).astype(int).astype(str)
-    )
-
-    zona_activa = st.session_state["explora_zona_id"]
-    en_detalle = False
-    titulo_zona = None
-
-    if region != "Todas (elegir en el mapa)":
-        en_detalle = True
-        datos_mapa = vista
-        titulo_zona = region
-    elif zona_activa is not None:
-        sub_zona = vista[vista["zona_id"] == zona_activa]
-        if sub_zona.empty:
-            st.session_state["explora_zona_id"] = None
-            datos_mapa = vista
-        else:
-            en_detalle = True
-            datos_mapa = sub_zona
-            titulo_zona = _nombre_principal(sub_zona["region"])
-    else:
-        datos_mapa = vista
-
-    # 3. Barra de contexto cuando estamos con zoom en una zona
-    if en_detalle:
-        b1, b2 = st.columns([3, 1.2])
-        b1.markdown(f"#### Zona enfocada: **{titulo_zona}** ({miles(len(datos_mapa))} sismos)")
-        if region == "Todas (elegir en el mapa)":
-            if b2.button("← Volver al mapa por zonas", use_container_width=True, type="primary"):
-                st.session_state["explora_zona_id"] = None
-                st.rerun()
-        else:
-            b2.caption("Elegí «Todas» arriba para volver a la vista mundial.")
-    else:
-        ver_sueltos = st.toggle("Ver todos los puntos sin agrupar", value=False)
-        if ver_sueltos:
-            en_detalle = True
-            datos_mapa = vista
-
-    # 4. KPIs dinámicos sincronizados
+    # 3. KPIs dinámicos sincronizados
     k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Sismos visibles", miles(len(datos_mapa)))
-    k2.metric("Con marca USGS", miles(int((datos_mapa["marca_real"] == "Sí").sum())))
-    k3.metric("Alertas del modelo", miles(int(datos_mapa["alerta"].sum())),
+    k1.metric("Sismos filtrados", miles(len(vista)))
+    k2.metric("Con marca USGS", miles(int((vista["marca_real"] == "Sí").sum())))
+    k3.metric("Alertas del modelo", miles(int(vista["alerta"].sum())),
               help=f"Probabilidad ≥ {num(UMBRAL, 2)}")
-    k4.metric("Magnitud máxima", num(datos_mapa["mag"].max(), 1))
+    k4.metric("Magnitud máxima", num(vista["mag"].max(), 1))
 
-    # 5A. NIVEL 1: MAPA PLANO POR ZONAS (una sola copia del mundo, clic para hacer zoom)
-    if not en_detalle:
-        zonas = (
-            vista.groupby("zona_id", as_index=False)
-            .agg(
-                lat=("latitude", "mean"),
-                lon=("longitude", "mean"),
-                sismos=("mag", "size"),
-                con_marca=("marca_real", lambda s: int((s == "Sí").sum())),
-                alertas=("alerta", "sum"),
-                errores=("resultado", lambda s: int(s.isin(["falso negativo", "falsa alarma"]).sum())),
-                mag_max=("mag", "max"),
-                nombre=("region", _nombre_principal),
-            )
-        )
-        zonas["tasa_alerta"] = zonas["alertas"] / zonas["sismos"]
-        tam_burbuja = np.interp(np.sqrt(zonas["sismos"]), [1, np.sqrt(max(zonas["sismos"].max(), 2))], [18, 44])
+    # 4. Layout en dos columnas: izquierda = gráfico de ejes + mapa de calor; derecha = ficha + ubicación
+    col_graf, col_ubic = st.columns([1.45, 1.0])
 
-        custom_z = np.stack([
-            zonas["zona_id"],
-            zonas["nombre"],
-            zonas["sismos"].map(miles),
-            zonas["con_marca"].map(miles),
-            zonas["errores"].map(miles),
-            zonas["mag_max"].map(lambda v: num(v, 1)),
-        ], axis=-1)
-
-        fig = go.Figure(go.Scattergeo(
-            lat=zonas["lat"],
-            lon=zonas["lon"],
-            mode="markers+text",
-            text=zonas["sismos"].astype(str),
-            textfont=dict(size=10, color="white"),
-            textposition="middle center",
-            marker=dict(
-                size=tam_burbuja,
-                color=zonas["tasa_alerta"],
-                colorscale=[[0.0, "#7b8fa1"], [0.45, AZUL], [1.0, ACENTO]],
-                cmin=0,
-                cmax=1,
-                opacity=0.9,
-                line=dict(width=1, color="white"),
-                colorbar=dict(title="% alerta", tickformat=".0%", len=0.65, thickness=12),
-            ),
-            customdata=custom_z,
-            hovertemplate=(
-                "<b>Zona: %{customdata[1]}</b><br>"
-                "Sismos en esta zona: <b>%{customdata[2]}</b><br>"
-                "Con marca USGS: %{customdata[3]} · Errores del modelo: %{customdata[4]}<br>"
-                "Magnitud máxima: %{customdata[5]}<br>"
-                "<i>Hacé clic para hacer zoom y ver cada sismo</i><extra></extra>"
-            ),
-            name="Zonas",
-        ))
-        fig.update_layout(
-            geo=_geo_plano(),
-            height=470,
-            margin=dict(l=0, r=0, t=5, b=0),
-            clickmode="event+select",
-        )
-
-        evento = st.plotly_chart(
-            fig,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="points",
-            key="mapa_explora_zonas",
-        )
-        puntos = evento.get("selection", {}).get("points", []) if isinstance(evento, dict) else []
-        if puntos:
-            pt = puntos[0]
-            zona_click = None
-            cd = pt.get("customdata")
-            if isinstance(cd, (list, tuple)) and len(cd) > 0:
-                zona_click = cd[0]
-            elif pt.get("point_index") is not None and 0 <= pt["point_index"] < len(zonas):
-                zona_click = zonas.iloc[pt["point_index"]]["zona_id"]
-            if zona_click:
-                st.session_state["explora_zona_id"] = zona_click
-                st.rerun()
-
-        st.caption(
-            f"Se muestran **{len(zonas)} zonas** que resumen {miles(len(vista))} sismos. "
-            "Hacé clic en cualquier círculo para acercarte y explorar sismo por sismo."
-        )
-
-    # 5B. NIVEL 2: MAPA PLANO CON ZOOM Y SISMOS INDIVIDUALES
-    else:
-        if titulo_zona is None:
-            geo_cfg = _geo_plano()
-        else:
-            centro, escala = _vista_mapa_detalle(datos_mapa)
-            geo_cfg = _geo_plano(centro=centro, escala=escala, detalle=True)
-
-        orden_capas = ["acierto: sin marca", "sin marca cargada", "falsa alarma", "acierto: con marca", "falso negativo"]
+    with col_graf:
+        ver_calor = st.toggle("Mostrar mapa de calor de densidad de fondo", value=True)
         fig = go.Figure()
+
+        # Capa 1: Mapa de calor 2D (escala logarítmica para que no lo domine el pico de profundidad = 10 km)
+        if ver_calor and len(vista) >= 5:
+            x_vals = vista["mag"].to_numpy()
+            y_vals = vista[col_y].to_numpy()
+            if np.nanmax(x_vals) > np.nanmin(x_vals) and np.nanmax(y_vals) > np.nanmin(y_vals):
+                H, x_edges, y_edges = np.histogram2d(x_vals, y_vals, bins=[24, 20])
+                z_log = np.where(H.T > 0, np.log1p(H.T), np.nan)
+                x_mid = (x_edges[:-1] + x_edges[1:]) / 2
+                y_mid = (y_edges[:-1] + y_edges[1:]) / 2
+                max_h = int(H.max())
+                ticks_reales = [v for v in [1, 3, 10, 30, 100, 300, 1000] if v <= max_h]
+                if not ticks_reales:
+                    ticks_reales = [max(max_h, 1)]
+                fig.add_trace(go.Heatmap(
+                    x=x_mid,
+                    y=y_mid,
+                    z=z_log,
+                    colorscale=[
+                        [0.0, "rgba(254, 243, 199, 0.50)"],
+                        [0.35, "rgba(252, 211, 77, 0.50)"],
+                        [0.70, "rgba(245, 158, 11, 0.45)"],
+                        [1.0, "rgba(180, 83, 9, 0.50)"],
+                    ],
+                    zsmooth="best",
+                    hoverinfo="skip",
+                    showscale=True,
+                    colorbar=dict(
+                        title="Sismos<br>/ celda",
+                        tickvals=[np.log1p(v) for v in ticks_reales],
+                        ticktext=[str(v) for v in ticks_reales],
+                        len=0.55,
+                        thickness=11,
+                        x=1.01,
+                    ),
+                ))
+
+        # Capa 2: Puntos clicables por resultado (si hay >2.500 grises "sin marca", muestreamos sólo los grises)
+        muestreo_grises = False
+        orden_capas = ["acierto: sin marca", "sin marca cargada", "falsa alarma", "acierto: con marca", "falso negativo"]
         for res in orden_capas:
-            sub = datos_mapa[datos_mapa["resultado"] == res]
+            sub = vista[vista["resultado"] == res]
             if sub.empty:
                 continue
-            opacidad = 0.35 if res == "acierto: sin marca" else 0.9
-            borde = 0.0 if res == "acierto: sin marca" else 0.7
+            if res == "acierto: sin marca" and len(sub) > 2500:
+                sub = sub.sample(2500, random_state=42)
+                muestreo_grises = True
+            opacidad = 0.45 if res == "acierto: sin marca" else 0.92
+            tam = 6 if res == "acierto: sin marca" else 9
+            borde = 0.4 if res == "acierto: sin marca" else 1.0
             custom = np.stack([
+                sub["id"].astype(str),
                 sub["place"].fillna("—"),
                 sub["time"].str.slice(0, 16),
                 sub["mag"].map(lambda v: num(v, 1)),
-                sub["magType"].fillna("—"),
                 sub["depth"].map(lambda v: num(v, 0)),
                 sub["en_el_mar"],
                 sub["marca_real"],
                 sub["prob_txt"],
                 sub["resultado"],
-                sub["conjunto"],
             ], axis=-1)
-            fig.add_trace(go.Scattergeo(
-                lat=sub["latitude"],
-                lon=sub["longitude"],
-                name=f"{res} ({miles(len(sub))})",
+            fig.add_trace(go.Scatter(
+                x=sub["mag"],
+                y=sub[col_y],
                 mode="markers",
+                name=f"{res} ({miles(int((vista['resultado'] == res).sum()))})",
                 marker=dict(
-                    size=np.interp(sub["tam_mapa"], [1, 40], [7, 20]),
+                    size=tam,
                     color=COLORES_RESULTADO[res],
                     opacity=opacidad,
                     line=dict(width=borde, color="white"),
                 ),
                 customdata=custom,
                 hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "Fecha: %{customdata[1]} UTC<br>"
-                    "Magnitud: <b>%{customdata[2]}</b> (%{customdata[3]}) · Profundidad: %{customdata[4]} km<br>"
-                    "Epicentro: %{customdata[5]}<br>"
-                    "Marca USGS: <b>%{customdata[6]}</b><br>"
-                    "Probabilidad modelo: <b>%{customdata[7]}</b> (%{customdata[8]})<br>"
-                    "Conjunto: %{customdata[9]}<extra></extra>"
+                    "<b>%{customdata[1]}</b><br>"
+                    "Fecha: %{customdata[2]} UTC<br>"
+                    "Magnitud: <b>%{customdata[3]}</b> · Profundidad: %{customdata[4]} km (%{customdata[5]})<br>"
+                    "Marca USGS: <b>%{customdata[6]}</b> · Probabilidad: <b>%{customdata[7]}</b><br>"
+                    "<i>Hacé clic para ver toda la info y su ubicación</i><extra></extra>"
                 ),
             ))
 
+        # Resaltar el punto actualmente seleccionado en el gráfico de ejes
+        id_activo = st.session_state["explora_sismo_id"]
+        if id_activo is not None:
+            sel_en_vista = vista[vista["id"].astype(str) == str(id_activo)]
+            if not sel_en_vista.empty:
+                fila_sel = sel_en_vista.iloc[0]
+                fig.add_trace(go.Scatter(
+                    x=[fila_sel["mag"]],
+                    y=[fila_sel[col_y]],
+                    mode="markers",
+                    name="Sismo seleccionado",
+                    marker=dict(size=16, symbol="circle-open", color="#111111", line=dict(width=3)),
+                    hoverinfo="skip",
+                ))
+
+        # Líneas de referencia según el eje Y elegido
+        if col_y == "prob_pct_num":
+            fig.add_hline(y=UMBRAL * 100, line_dash="dash", line_color="#e3242b", line_width=1.5,
+                          annotation_text=f"umbral alerta ({pct(UMBRAL)})", annotation_position="top right")
+        elif col_y == "dist_costa_km":
+            fig.add_hline(y=0, line_dash="dash", line_color="#4a5560", line_width=1.3,
+                          annotation_text="línea de costa (arriba mar / abajo tierra)", annotation_position="top right")
+
         fig.update_layout(
-            geo=geo_cfg,
-            height=470,
-            margin=dict(l=0, r=0, t=10, b=0),
-            legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0, title=None),
+            xaxis_title="Magnitud del sismo",
+            yaxis_title=titulo_y,
+            height=500,
+            margin=dict(l=10, r=10, t=30, b=10),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, title=None),
+            clickmode="event+select",
+            plot_bgcolor="#ffffff",
         )
-        st.plotly_chart(fig, use_container_width=True, key="mapa_explora_detalle")
-        st.caption(
-            "Podés usar la rueda del mouse para acercarte más, arrastrar el mapa o hacer clic en la leyenda "
-            "para prender y apagar resultados."
-        )
+        fig.update_xaxes(gridcolor="#eeeeee", zeroline=False)
+        fig.update_yaxes(gridcolor="#eeeeee", zeroline=False)
 
-    # 6. Distribución por magnitud sincronizada
-    col_hist, col_info = st.columns([2.2, 1])
-    with col_hist:
-        fig_hist = px.histogram(
-            datos_mapa,
-            x="mag",
-            color="resultado",
-            nbins=25,
-            color_discrete_map=COLORES_RESULTADO,
-            category_orders={"resultado": RESULTADOS},
-            labels={"mag": "Magnitud", "count": "Sismos", "resultado": "Resultado"},
-            title="Distribución por magnitud" + (f" · {titulo_zona}" if titulo_zona else " (todas las zonas)"),
+        evento = st.plotly_chart(
+            fig,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="points",
+            key="explora_ejes_calor",
         )
-        fig_hist.update_layout(
-            height=250,
-            margin=dict(l=0, r=0, t=35, b=0),
-            barmode="stack",
-            showlegend=False,
-            yaxis_title="Sismos",
-        )
-        st.plotly_chart(fig_hist, use_container_width=True)
+        puntos = evento.get("selection", {}).get("points", []) if isinstance(evento, dict) else []
+        if puntos:
+            cd = puntos[0].get("customdata")
+            if isinstance(cd, (list, tuple)) and len(cd) > 0:
+                if str(cd[0]) != str(st.session_state["explora_sismo_id"]):
+                    st.session_state["explora_sismo_id"] = str(cd[0])
+                    st.rerun()
 
-    with col_info:
-        st.markdown("##### Qué mirar acá")
-        if enfoque == "Sismos 2026 sin marca cargada":
-            st.markdown(
-                f"Son los **{miles(len(recientes))} sismos** desde abril de 2026 sin marca de la USGS. El modelo "
-                f"lanza alerta en **{int(recientes['alerta'].sum())}**, incluidos los "
-                f"**{len(grandes_recientes)}** de magnitud ≥ 7,2 "
-                f"({', '.join(f'{r.region} {num(r.mag, 1)}' for r in grandes_recientes.itertuples())})."
+        if muestreo_grises:
+            st.caption(
+                "El mapa de calor usa **todos** los sismos filtrados. Para mantener ágil el navegador se muestran "
+                "todos los casos con marca/errores y una muestra de 2.500 sismos grises sin marca (filtrá por región "
+                "o magnitud para ver el 100 %)."
             )
         else:
-            st.markdown(
-                "- **Clic en un círculo** del mapa general para hacer zoom directo a esa zona.\n"
-                "- **Probá cliquear Alaska** para ver la concentración de sismos chicos marcados.\n"
-                "- **Cambiá a «Sólo errores»** arriba para detectar dónde le cuesta al modelo."
-            )
+            st.caption("Hacé clic en la leyenda para prender o apagar resultados, o tocá cualquier punto para ubicarlo.")
 
-    # 7. Tabla explorable sincronizada
-    with st.expander(f"Ver detalle tabular ({miles(len(datos_mapa))} sismos, ordenados por magnitud)"):
-        cols = ["time", "place", "mag", "magType", "depth", "en_el_mar", "marca_real", "prob_txt", "resultado",
-                "conjunto"]
+    # 5. Panel derecho: ficha completa del sismo tocado + mapa centrado en su ubicación exacta
+    with col_ubic:
+        st.markdown("##### Sismo seleccionado y ubicación")
+        id_sel = st.session_state["explora_sismo_id"]
+        fila = None
+        if id_sel is not None:
+            match = vista[vista["id"].astype(str) == str(id_sel)]
+            if not match.empty:
+                fila = match.iloc[0]
+
+        if fila is None:
+            st.info("**Tocá cualquier punto** en el gráfico de la izquierda para ver su ficha completa y acercarte "
+                    "a su ubicación exacta en el mapa.")
+            fig_ref = go.Figure(go.Scattergeo(
+                lat=vista["latitude"].head(1500),
+                lon=vista["longitude"].head(1500),
+                mode="markers",
+                marker=dict(size=4, color=ACENTO, opacity=0.45),
+                hoverinfo="skip",
+            ))
+            fig_ref.update_layout(geo=_geo_plano(), height=310, margin=dict(l=0, r=0, t=5, b=0))
+            st.plotly_chart(fig_ref, use_container_width=True, key="explora_mapa_ref")
+        else:
+            lat_s, lon_s = float(fila["latitude"]), float(fila["longitude"])
+            dlat = (vista["latitude"] - lat_s).abs()
+            dlon = ((vista["longitude"] - lon_s + 180) % 360 - 180).abs()
+            vecinos = vista[(dlat <= 10) & (dlon <= 14) & (vista["id"].astype(str) != str(fila["id"]))].head(120)
+
+            fig_loc = go.Figure()
+            if not vecinos.empty:
+                fig_loc.add_trace(go.Scattergeo(
+                    lat=vecinos["latitude"],
+                    lon=vecinos["longitude"],
+                    mode="markers",
+                    name="Otros sismos cercanos",
+                    marker=dict(size=6, color="#8a96a0", opacity=0.5),
+                    hovertext=vecinos["place"].fillna("—") + " (M " + vecinos["mag"].map(lambda v: num(v, 1)) + ")",
+                    hoverinfo="text",
+                ))
+            fig_loc.add_trace(go.Scattergeo(
+                lat=[lat_s],
+                lon=[lon_s],
+                mode="markers",
+                name="Sismo elegido",
+                marker=dict(
+                    size=16,
+                    color=COLORES_RESULTADO.get(fila["resultado"], "#e3242b"),
+                    line=dict(width=3, color="white"),
+                ),
+                hovertemplate=f"<b>{fila['place']}</b><br>Lat {num(lat_s, 2)} · Lon {num(lon_s, 2)}<extra></extra>",
+            ))
+            fig_loc.update_layout(
+                geo=_geo_plano(centro={"lat": lat_s, "lon": lon_s}, escala=5.5, detalle=True),
+                height=265,
+                margin=dict(l=0, r=0, t=5, b=0),
+                showlegend=False,
+            )
+            st.plotly_chart(fig_loc, use_container_width=True, key=f"explora_mapa_sel_{fila['id']}")
+
+            # Ficha completa del sismo
+            with st.container(border=True):
+                st.markdown(f"**{fila['place']}**")
+                st.caption(f"Fecha: {str(fila['time'])[:19].replace('T', ' ')} UTC · Conjunto: `{fila['conjunto']}`")
+                i1, i2, i3 = st.columns(3)
+                i1.metric("Magnitud", num(fila["mag"], 1), help=f"Tipo: {fila['magType']}")
+                i2.metric("Profundidad", f"{num(fila['depth'], 0)} km")
+                i3.metric("Prob. modelo", fila["prob_txt"])
+                st.markdown(
+                    f"- **Resultado:** `{fila['resultado']}` · **Marca USGS:** **{fila['marca_real']}**\n"
+                    f"- **Ubicación:** {fila['en_el_mar']} ({num(fila['dist_costa_km'], 0)} km a la costa) · "
+                    f"Lat `{num(lat_s, 2)}`, Lon `{num(lon_s, 2)}`\n"
+                    f"- **Tipo de magnitud:** `{fila['magType']}`"
+                )
+
+            # Botones directos para abrir la ubicación real o simularlo en «Probá el modelo»
+            b1, b2 = st.columns(2)
+            b1.link_button("Abrir en Google Maps", f"https://www.google.com/maps?q={lat_s},{lon_s}",
+                           use_container_width=True)
+            b2.link_button("Ficha oficial USGS",
+                           f"https://earthquake.usgs.gov/earthquakes/eventpage/{fila['id']}/executive",
+                           use_container_width=True)
+
+            if st.button("Probar este sismo en «Probá el modelo» →", use_container_width=True, type="primary"):
+                r_ = resumen["rangos"]
+                tipos_ = resumen["magtypes"]
+                st.session_state["_proba_pendiente"] = {
+                    "proba_mag": float(np.clip(round(float(fila["mag"]), 1), r_["mag"][0], r_["mag"][1])),
+                    "proba_depth": float(np.clip(round(float(fila["depth"])), r_["depth"][0], r_["depth"][1])),
+                    "proba_lat": float(np.clip(round(lat_s, 1), r_["latitude"][0], r_["latitude"][1])),
+                    "proba_lon": float(np.clip(round(lon_s, 1), r_["longitude"][0], r_["longitude"][1])),
+                    "proba_mar": "mar" if fila["en_el_mar"] == "mar" else "tierra",
+                    "proba_magtype": fila["magType"] if fila["magType"] in tipos_ else "mww",
+                    "proba_zoom_zona": str(fila["region"]) if pd.notna(fila["region"]) else str(fila["place"]),
+                    "proba_ejemplo_prev": "— armarlo desde cero —",
+                    "proba_mapa_ver": st.session_state.get("proba_mapa_ver", 0) + 1,
+                }
+                ir_a("Probá el modelo")
+                st.rerun()
+
+    # 6. Tabla explorable sincronizada
+    with st.expander(f"Ver detalle tabular ({miles(len(vista))} sismos filtrados, ordenados por magnitud)"):
+        cols = ["time", "place", "mag", "magType", "depth", "dist_costa_km", "en_el_mar", "marca_real",
+                "prob_txt", "resultado", "conjunto"]
         renombre = {
             "time": "Fecha (UTC)", "place": "Lugar", "mag": "Magnitud", "magType": "Tipo",
-            "depth": "Profundidad (km)", "en_el_mar": "Epicentro", "marca_real": "Marca USGS",
-            "prob_txt": "Prob. modelo", "resultado": "Resultado", "conjunto": "Conjunto",
+            "depth": "Profundidad (km)", "dist_costa_km": "Dist. costa (km)", "en_el_mar": "Epicentro",
+            "marca_real": "Marca USGS", "prob_txt": "Prob. modelo", "resultado": "Resultado", "conjunto": "Conjunto",
         }
         st.dataframe(
-            datos_mapa.sort_values(["mag", "probabilidad"], ascending=False)[cols].head(300).rename(columns=renombre),
+            vista.sort_values(["mag", "probabilidad"], ascending=False)[cols].head(300).rename(columns=renombre),
             hide_index=True,
             use_container_width=True,
         )
@@ -1631,6 +1636,8 @@ La **magnitud** mide el tamaño de un sismo, pero hay dos familias de cálculo:
         f"Datos: USGS (earthquake.usgs.gov), sismos del {resumen['datos']['desde']} al {resumen['datos']['hasta']}. "
         f"Modelo: gradient boosting entrenado con datos hasta el 31/03/2026, semilla {resumen['semilla']}."
     )
+
+
 # =================================================================================================
 # ENRUTADOR DE PÁGINAS
 # =================================================================================================
@@ -1643,6 +1650,7 @@ RUTAS = {
     "Probá el modelo": pagina_proba,
 }
 RUTAS[st.session_state["pagina"]]()
+
 if st.session_state.pop("_ir_arriba", False):
     n = st.session_state.get("_nav_n", 0)
     components.html(
